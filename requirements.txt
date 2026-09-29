@@ -1,0 +1,10 @@
+# Jev (TypeSafe AI hosted API) — official Python SDK
+typesafe-sdk==0.7.1
+# Laya (Convai Innovations, open weights, runs locally; pulls in torch + transformers)
+laya==0.3.11
+python-dotenv>=1.0
+# statistics in experiments/analyze.py (chi-square, binomial tests)
+scipy>=1.11
+# shareable figures in experiments/figures.py
+matplotlib>=3.8
+pytest>=8
