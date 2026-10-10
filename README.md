@@ -1,6 +1,6 @@
 # Jev vs Laya: Decision Games
 
-Two AI decision models, **Jev** and **Laya**, play six classic game-theory games under identical conditions: the same rules, the same information and the same questions. The repository contains the game engine, experiments, statistical analysis, and a browser app where you can watch them play, or play against them yourself.
+Two AI decision models, **Jev** and **Laya**, play six classic game-theory games using the same rules, state descriptions and questions (effective inputs can differ when a model truncates its context). The repository contains the game engine, experiments, statistical analysis, and a browser app where you can watch them play, or play against them yourself.
 
 The goal is not to crown a winner. It is to see **how** each model behaves in the same controlled environment, and how that compares with what game theory predicts.
 
@@ -19,9 +19,9 @@ Neither model generates text. Both are *decision models*: they receive a **state
 
 ## Findings
 
-Across 53 experiments and 4,630 model decisions:
+The original report described 53 experiments and 4,630 model decisions. **The source results are not included in this checkout or a published release, so the historical findings and figures below have not been revalidated with the corrected analysis.**
 
-- **Jev adapts.** It reads the history, exploits an opponent's habits, and lands on the textbook answer wherever one exists: it always switches in Monty Hall and mostly picks 0 in the Beauty Contest.
+- **Jev showed behavior consistent with responding to history in the reported runs.** It reportedly always switched in Monty Hall and mostly picked 0 in the Beauty Contest. Establishing adaptation requires paired tests with the same current state and controlled changes to opponent history.
 - **Laya mostly sticks to fixed choices**, whatever the game or the opponent does.
 - **Neither model is unpredictable.** Both give the same answer to the same situation, so neither mixes its moves the way game theory recommends for games like Rock Paper Scissors.
 - **Laya shows position bias.** When only the order of the options is reversed, Laya changed its answer in 3 of 10 comparable cases (for example cooperating → defecting in the Prisoner's Dilemma). Jev kept its answer in 9 out of 9.
@@ -86,7 +86,7 @@ You can also play in the terminal: `python experiments/run_tournament.py --playe
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env         # then put your key in TYPESAFE_API_KEY
-pytest                       # 103 tests: game rules, runner, analysis, app; no API key needed
+pytest                       # game rules, runner, analysis, app; no API key needed
 ```
 
 `.env` settings:
@@ -160,7 +160,15 @@ Each run writes `results/<game>/<experiment_id>/`:
 - `rounds.jsonl`: one line per round: decisions, roles, points and game facts (target number, prize door, …).
 - `summary.json`: totals per player and game-specific statistics.
 
-Results are not committed by default (see `.gitignore`); run the plan to regenerate them.
+Results are not committed by default (see `.gitignore`). Existing experiment directories are rejected to protect saved data; use a new experiment ID for each run. New configs record the Python/package versions and Git revision, and decision logs preserve option descriptions.
+
+Archive completed experiments for a release or other permanent storage:
+
+```bash
+python experiments/archive.py results --out experiment-results.zip
+```
+
+The archive contains configs, decisions, rounds, summaries, and a SHA-256 manifest. It excludes application logs and environment files and refuses to replace an existing archive. Archive runs before publishing findings. Re-running a plan creates new evidence; it does not recover the missing historical dataset.
 
 ## Analysis
 
@@ -170,8 +178,9 @@ python experiments/analyze.py results --match plan_20260928-1329 --csv overview.
 python experiments/figures.py                                                   # the charts above
 ```
 
-- **Choices:** action shares with 95% Wilson confidence intervals, and the model's average reported probability for each option (its implied mixed strategy).
-- **Tests against theory:** chi-square against the mixed equilibrium, run **only when almost every decision had a different input**. A deterministic model gives the same answer to the same input, so repeated identical inputs are not independent samples. Monty Hall win rates get binomial tests.
+- **Choices:** descriptive action shares and mean reported probabilities. Action counts have no confidence intervals because decisions within a run are not established independent samples.
+- **Theory comparisons:** equilibrium action shares are reference values; action-count chi-square tests are disabled. Unique states or changing round numbers do not establish independence. Monty Hall outcome binomial tests remain separate descriptive statistics.
+- **Context limits:** choice summaries, position-bias comparisons, and newly generated charts exclude an entire round if any final decision reaches its reported context limit. Reports separately show at-limit choices and unknown telemetry. Missing telemetry is not evidence that an input fit. Points, reactions, and game outcome summaries still describe all recorded rounds. Filtering cannot undo effects of earlier truncated decisions on later histories; controlled reruns with compact inputs are needed for a fair comparison.
 - **Reactions:** repeat rate, win-stay / lose-shift, responses to each opponent move, and in Rock Paper Scissors how often a player beats the opponent's last move.
 - **Beauty Contest reasoning depth (level-k):** a level-k player picks 50 × (2/3)^k.
 - **Position bias:** each experiment is paired with its reversed-order twin. The same choice in a new position means a preference; a new choice in the same position means position bias.
@@ -199,7 +208,7 @@ experiments/run_tournament.py   validation, retries, logging, token budget, summ
 games/          the six games + shared base
 players/        Jev, Laya, human and baseline players
 experiments/    run_tournament.py, run_plan.sh, analyze.py, figures.py, viewer.py, app.py
-tests/          103 tests
+tests/          automated tests
 figures/        the charts in this README
 results/        experiment output (not committed)
 ```

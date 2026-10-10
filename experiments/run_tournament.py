@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
+import subprocess
 import statistics
 import sys
 from datetime import datetime, timezone
 from fractions import Fraction
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 # Allow `python experiments/run_tournament.py` from the project root without installing a package.
@@ -80,6 +83,23 @@ def make_game(args) -> Game:
     return GAMES[args.game](**common)
 
 
+def environment_metadata() -> dict:
+    packages = {}
+    for name in ("typesafe-sdk", "laya", "torch", "transformers", "scipy", "numpy"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = None
+    try:
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
+    except (OSError, subprocess.CalledProcessError):
+        revision, dirty = None, None
+    return {"python": platform.python_version(), "platform": platform.platform(),
+            "packages": packages, "git_revision": revision, "git_dirty": dirty}
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
@@ -119,7 +139,12 @@ def run_match(game: Game, players: list[Player], rounds: int, max_attempts: int,
     stop after the current round (so the budget can be overshot by at most one round)."""
     if not game.min_players <= len(players) <= game.max_players:
         raise ValueError(f"{game.title} needs {game.min_players}-{game.max_players} players, got {len(players)}")
+    if rounds < 1 or max_attempts < 1:
+        raise ValueError("rounds and max_attempts must be positive")
     out_dir.mkdir(parents=True, exist_ok=True)
+    if any((out_dir / name).exists() for name in ("decisions.jsonl", "rounds.jsonl", "summary.json")):
+        raise FileExistsError(f"experiment outputs already exist: {out_dir}")
+    # Exclusive creation protects direct callers as well as CLI runs.
     names = unique_names(players)
     history: list[dict] = []  # non-void rounds; games build what players see from this
     records: list[dict] = []
@@ -133,7 +158,7 @@ def run_match(game: Game, players: list[Player], rounds: int, max_attempts: int,
     rounds_played = 0
     stopped_early = None
 
-    with open(out_dir / "decisions.jsonl", "w") as dec_f, open(out_dir / "rounds.jsonl", "w") as rnd_f:
+    with open(out_dir / "decisions.jsonl", "x") as dec_f, open(out_dir / "rounds.jsonl", "x") as rnd_f:
         for r in range(1, rounds + 1):
             order = list(range(len(players)))  # order[role] = player index
             if game.alternate_roles and r % 2 == 0:
@@ -156,7 +181,7 @@ def run_match(game: Game, players: list[Player], rounds: int, max_attempts: int,
                         "experiment_id": experiment_id, "game": game.name, "round": r,
                         "player": names[i], "seat": i, "step": step, "attempt": attempt,
                         "state": request.state, "question": request.question,
-                        "available_actions": list(request.options),
+                        "available_actions": list(request.options), "options": request.options,
                         "decision": d.action, "valid": ok, "error": d.error,
                         # null = the model did not report it; never filled in by us
                         "probabilities": d.probabilities, "confidence": d.confidence,
@@ -303,14 +328,20 @@ def main(argv: list[str] | None = None) -> None:
     game = make_game(args)
     if not game.min_players <= len(args.players) <= game.max_players:
         ap.error(f"{game.title} needs {game.min_players}-{game.max_players} players, got {len(args.players)}")
-    players = make_players(args.players, args.seed, args.human_channel)
+
+    if args.rounds < 1 or args.max_attempts < 1:
+        ap.error("rounds and max-attempts must be positive")
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     experiment_id = args.experiment_id or f"{SHORT_NAMES[game.name]}_{args.condition}_{args.mode}_{stamp}"
     out_dir = Path(args.results_dir) / game.name / experiment_id
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        ap.error(f"experiment directory already exists: {out_dir}; choose a new experiment ID")
+    players = make_players(args.players, args.seed, args.human_channel)
     config = {"experiment_id": experiment_id, "created": now(), "args": vars(args),
-              "players": args.players, "game_config": game.config(),
+              "players": args.players, "game_config": game.config(), "environment": environment_metadata(),
               "retry_policy": {"max_attempts": args.max_attempts,
                                "note": "retry only on invalid/error; typesafe-sdk also retries 429/5xx/timeouts internally"}}
     (out_dir / "config.json").write_text(json.dumps(config, indent=2))
