@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experiments.analyze import load_experiment  # noqa: E402
+from experiments.analyze import comparison_decisions, load_experiment  # noqa: E402
 
 RESULTS = ROOT / "results"
 
@@ -100,7 +100,7 @@ def shares(plan: str, names: list[str], model: str, step: str, game: str) -> tup
     """Share of each option among `model`'s valid decisions for `step`, pooled over the experiments."""
     counts = Counter()
     for name in names:
-        for d in load(plan, name)["decisions"]:
+        for d in comparison_decisions(load(plan, name)):
             if d["player"].startswith(model) and d["step"] == step and d["valid"]:
                 counts[bin_label(d["decision"]) if game == "beauty_contest" else d["decision"]] += 1
     n = sum(counts.values())
@@ -175,6 +175,7 @@ def panel_rows(plan, game, step, sources, theory):
 def make_figure(plan: str, game: str, panels: list) -> plt.Figure:
     prepared, heights = [], []
     for title, step, sources, options, theory, caption in panels:
+        caption += " Rounds hitting a reported context limit are excluded; missing telemetry remains unknown."
         rows = panel_rows(plan, game, step, sources, theory)
         if game == "ultimatum" and step == "offer":  # 11 possible offers: keep only those chosen
             options = [o for o in options if any(r[1].get(o) for r in rows)]

@@ -7,11 +7,9 @@
 Each analyzed experiment also gets an `analysis.json` next to its other files.
 `--csv FILE` writes the overview table (one row per model player per experiment).
 
-A note on the statistics: Jev and Laya give the same answer to the same input. Repeated
-decisions on identical inputs are therefore not independent samples, so tests against
-theory are only run when (almost) every decision had a different input. Decisions within
-one history match also share overlapping history, so p-values there are optimistic.
-Treat all tests as descriptive guides, not proof.
+Choice frequencies describe the observed run. Repeated or history-dependent decisions
+are not independent samples: no confidence intervals or goodness-of-fit p-values are
+assigned to action counts. Monty Hall outcome statistics are reported separately.
 """
 
 from __future__ import annotations
@@ -35,7 +33,6 @@ THEORY = {
     "matching_pennies": {"action": {"HEADS": 0.5, "TAILS": 0.5}},
     "rps": {"action": {"ROCK": 1 / 3, "PAPER": 1 / 3, "SCISSORS": 1 / 3}},
 }
-MIN_DISTINCT_SHARE = 0.8  # share of decisions with a unique input needed before running a test
 BEATS = {"ROCK": "SCISSORS", "SCISSORS": "PAPER", "PAPER": "ROCK"}
 MODEL_PREFIXES = ("jev", "laya")
 
@@ -77,7 +74,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
 def frequencies(actions: list[str], options: list[str]) -> dict:
     n = len(actions)
     counts = Counter(actions)
-    return {a: {"count": counts[a], "share": counts[a] / n if n else None, "ci95": wilson(counts[a], n)}
+    return {a: {"count": counts[a], "share": counts[a] / n if n else None, "ci95": None}
             for a in options}
 
 
@@ -103,22 +100,44 @@ def reasoning_level(x: float, ratio: float, level0_mean: float = 50) -> float | 
 
 # --- per-experiment analysis ---------------------------------------------------------------------
 
+def context_status(d: dict) -> str:
+    """At-limit is a conservative proxy for truncation; missing telemetry is unknown."""
+    usage = d.get("usage") or {}
+    limit, tokens = usage.get("context_limit"), usage.get("input_tokens")
+    if limit is None or tokens is None:
+        return "unknown"
+    return "at_limit" if tokens >= limit else "below_limit"
+
+
+def comparison_decisions(exp: dict) -> list[dict]:
+    # Remove the entire paired round if any final decision hits its context limit.
+    excluded = {d["round"] for d in exp["decisions"] if context_status(d) == "at_limit"}
+    return [d for d in exp["decisions"] if d["round"] not in excluded]
+
+
 def player_step_stats(exp: dict, player: str, step: str) -> dict:
-    ds = [d for d in exp["decisions"] if d["player"] == player and d["step"] == step]
+    all_ds = [d for d in exp["decisions"] if d["player"] == player and d["step"] == step]
+    ds = [d for d in comparison_decisions(exp) if d["player"] == player and d["step"] == step]
     valid = [d for d in ds if d["valid"]]
-    options = ds[0]["available_actions"] if ds else []
     labels = sorted({a for d in ds for a in d["available_actions"]}, key=lambda a: (not a.isdigit(), int(a) if a.isdigit() else 0, a))
     actions = [d["decision"] for d in valid]
     inputs = {json.dumps([d["state"], d["question"], d["available_actions"]], sort_keys=True) for d in ds}
     out = {"decisions": len(ds), "valid": len(valid), "distinct_inputs": len(inputs),
-           "frequencies": frequencies(actions, labels if len(labels) <= 12 else sorted(set(actions)))}
+           "frequencies": frequencies(actions, labels if len(labels) <= 12 else sorted(set(actions))),
+           "excluded_context_round_decisions": len(all_ds) - len(ds),
+           "context_status_counts": dict(Counter(context_status(d) for d in all_ds)),
+           "at_limit_frequencies": frequencies(
+               [d["decision"] for d in all_ds if d["valid"] and context_status(d) == "at_limit"],
+               sorted({d["decision"] for d in all_ds if d["valid"] and context_status(d) == "at_limit"}))}
 
     # Mean of the model's own reported probabilities = its implied mixed strategy
     probs = [d["probabilities"] for d in valid if d["probabilities"]]
     if probs:
         out["mean_reported_probability"] = {a: statistics.fmean(p.get(a, 0) for p in probs) for a in labels} \
             if len(labels) <= 12 else None
-        out["mean_probability_of_chosen"] = statistics.fmean(p[d["decision"]] for p, d in zip(probs, valid))
+        chosen_probs = [d["probabilities"][d["decision"]] for d in valid
+                        if d.get("probabilities") and d["decision"] in d["probabilities"]]
+        out["mean_probability_of_chosen"] = statistics.fmean(chosen_probs) if chosen_probs else None
     confs = [d["confidence"] for d in valid if d["confidence"] is not None]
     out["mean_confidence"] = statistics.fmean(confs) if confs else None  # None = not reported
 
@@ -134,21 +153,13 @@ def player_step_stats(exp: dict, player: str, step: str) -> dict:
             out["first_half"] = dict(Counter(actions[:half]))
             out["second_half"] = dict(Counter(actions[half:]))
 
-    # Test against the mixed equilibrium, only when inputs really varied
     theory = THEORY.get(exp["summary"]["game"], {}).get(step)
     if theory and actions:
-        observed = [actions.count(a) for a in theory]
-        expected = [theory[a] * len(actions) for a in theory]
-        share_distinct = len(inputs) / len(ds)
-        if share_distinct < MIN_DISTINCT_SHARE:
-            out["test_vs_equilibrium"] = {"skipped": f"only {len(inputs)} distinct inputs for {len(ds)} decisions; "
-                                                     "repeated identical inputs are not independent samples"}
-        elif min(expected) < 5:
-            out["test_vs_equilibrium"] = {"skipped": "expected counts below 5"}
-        else:
-            chi2, p = stats.chisquare(observed, expected)
-            out["test_vs_equilibrium"] = {"test": "chi-square goodness of fit", "theory": theory,
-                                          "chi2": chi2, "p_value": p}
+        out["test_vs_equilibrium"] = {
+            "theory": theory,
+            "skipped": "decisions within a run are not established independent samples; "
+                       "distinct inputs (including round numbers) do not establish independence",
+        }
     return out
 
 
@@ -226,7 +237,8 @@ def analyze(exp: dict) -> dict:
                "decisions": len(exp["decisions"]), "attempts": len(attempts),
                "invalid_attempts": sum(not d["valid"] for d in attempts),
                "errors": sum(d["error"] is not None for d in attempts),
-               "estimated_cost_usd": s["estimated_cost_usd"]}
+               "estimated_cost_usd": s["estimated_cost_usd"],
+               "outcome_scope": "points, reactions and game outcomes include all rounds; choice comparisons exclude at-limit rounds"}
     players = {}
     for name in s["players"]:
         pl = [d["latency_ms"] for d in attempts if d["player"] == name]
@@ -277,7 +289,7 @@ def position_bias(exps: list[dict]) -> dict:
                 continue
             dist, mean_pos, states = {}, {}, {}
             for label, e in (("given", g), ("reversed", r)):
-                ds = [d for d in e["decisions"] if d["player"] == player and d["step"] == step and d["valid"]]
+                ds = [d for d in comparison_decisions(e) if d["player"] == player and d["step"] == step and d["valid"]]
                 if not ds:
                     break
                 n = len(ds)
@@ -313,7 +325,7 @@ def position_bias(exps: list[dict]) -> dict:
     # overall first/last-option rates per model, across all experiments
     rates = {}
     for model in MODEL_PREFIXES:
-        ds = [d for e in exps for d in e["decisions"]
+        ds = [d for e in exps for d in comparison_decisions(e)
               if d["player"].startswith(model) and d["valid"] and len(d["available_actions"]) > 1]
         if ds:
             rates[model] = {"decisions": len(ds),
@@ -350,6 +362,7 @@ def short(v) -> str:
 
 def print_full(a: dict) -> None:
     g = a["general"]
+    print("Choice comparisons exclude reported at-limit rounds; outcomes include all rounds.")
     print(f"\n{'=' * 78}\n{a['experiment_id']}  ({a['game']}, condition: {a['condition']})")
     print(f"rounds {g['rounds']} (scored {g['scored_rounds']}, void {g['void_rounds']})  decisions {g['decisions']}  "
           f"attempts {g['attempts']}  invalid {g['invalid_attempts']}  errors {g['errors']}  cost ${g['estimated_cost_usd']:.4f}")
@@ -359,6 +372,8 @@ def print_full(a: dict) -> None:
               (f", latency mean {lat['mean']:.0f} / median {lat['median']:.0f} / p95 {lat['p95']:.0f} ms" if lat else ""))
         for step, s in p["steps"].items():
             print(f"    [{step}] {s['valid']}/{s['decisions']} valid, {s['distinct_inputs']} distinct inputs")
+            print(f"      context: {s['context_status_counts']}; excluded paired-round decisions: "
+                  f"{s['excluded_context_round_decisions']}")
             freq = s["frequencies"]
             if len(freq) <= 12:
                 for act, f in freq.items():
@@ -403,6 +418,8 @@ def overview_rows(analyses: list[dict]) -> list[dict]:
                 t = s.get("test_vs_equilibrium") or {}
                 rows.append({"experiment": a["experiment_id"], "game": a["game"], "condition": a["condition"],
                              "player": name, "step": step, "n": s["valid"], "distinct_inputs": s["distinct_inputs"],
+                             "excluded_context_round_decisions": s["excluded_context_round_decisions"],
+                             "context_unknown": s["context_status_counts"].get("unknown", 0),
                              "top_choices": ", ".join(f"{k} {100 * v:.0f}%" for k, v in top),
                              "mean_confidence": s.get("mean_confidence"), "mean_position": s.get("mean_position"),
                              "points": p["points"], "equilibrium_p": t.get("p_value"),
@@ -418,7 +435,8 @@ def print_overview(rows: list[dict]) -> None:
         print(f"{exp[:33]:<34}{r['player'][:7]:<8}{r['step'][:14]:<15}{r['n']:>4}{r['distinct_inputs']:>5}  "
               f"{r['top_choices'][:33]:<34}{num(r['mean_confidence'], 2):>5}{num(r['mean_position'], 2):>5}{eq_p:>8}")
     print("\ninp = distinct inputs seen; conf = mean confidence; pos = mean position of the chosen option "
-          "(0 first, 1 last); eq p = chi-square p-value vs the mixed equilibrium (only when inputs varied)")
+          "(0 first, 1 last); eq p is omitted because within-run independence is not established.\n"
+          "Choice counts exclude reported at-limit rounds; points include all rounds. Unknown context telemetry is retained.")
 
 
 def print_position_bias(pb: dict) -> None:

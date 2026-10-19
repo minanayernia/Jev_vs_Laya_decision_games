@@ -51,11 +51,12 @@ def test_repeated_identical_inputs_are_not_tested(tmp_path):
     assert "skipped" in s["test_vs_equilibrium"]
 
 
-def test_varied_inputs_are_tested_against_equilibrium(tmp_path):
+def test_round_numbers_do_not_establish_independence(tmp_path):
     exp = save_match(tmp_path, RockPaperScissors(), [FixedPlayer(ROCK), RandomPlayer(seed=1)], 60)
     s = analyze(exp)["players"]["always_rock"]["steps"]["action"]
     assert s["distinct_inputs"] == 60
-    assert s["test_vs_equilibrium"]["p_value"] < 1e-10  # 100% ROCK is far from 1/3 each
+    assert "skipped" in s["test_vs_equilibrium"]
+    assert s["frequencies"][ROCK]["ci95"] is None
     assert s["frequencies"][ROCK]["share"] == 1 and s["mean_position"] == 0
 
 
@@ -109,3 +110,42 @@ def test_position_bias_detects_real_preference(tmp_path):
                      [Stubborn(), FixedPlayer(D)], 5, "r")
     (pair,) = position_bias([given, rev])["pairs"]
     assert pair["verdict"] == "preference (same choice)"
+
+
+def test_missing_probabilities_keep_decisions_aligned(tmp_path):
+    exp = save_match(tmp_path, RockPaperScissors(), [FixedPlayer(ROCK), FixedPlayer(PAPER)], 3)
+    decisions = [d for d in exp['decisions'] if d['player'] == 'always_rock']
+    decisions[0]['probabilities'] = None
+    decisions[1]['decision'] = PAPER
+    decisions[1]['probabilities'] = {PAPER: 0.8, ROCK: 0.2}
+    decisions[2]['probabilities'] = {PAPER: 0.4, ROCK: 0.6}
+    result = analyze(exp)['players']['always_rock']['steps']['action']
+    assert result['mean_probability_of_chosen'] == pytest.approx(0.7)
+
+
+def test_context_limit_excludes_both_players_in_round(tmp_path):
+    exp = save_match(tmp_path, RockPaperScissors(), [FixedPlayer(ROCK), FixedPlayer(PAPER)], 3)
+    exp['decisions'][0]['usage'] = {'input_tokens': 512, 'context_limit': 512}
+    result = analyze(exp)
+    for player in result['players'].values():
+        step = player['steps']['action']
+        assert step['valid'] == 2
+        assert step['excluded_context_round_decisions'] == 1
+    step = result['players']['always_rock']['steps']['action']
+    assert step['context_status_counts'] == {'at_limit': 1, 'unknown': 2}
+    assert step['at_limit_frequencies'][ROCK]['count'] == 1
+
+
+def test_all_context_limited_decisions_produce_empty_comparison(tmp_path):
+    exp = save_match(tmp_path, RockPaperScissors(), [FixedPlayer(ROCK), FixedPlayer(PAPER)], 1)
+    exp['decisions'][0]['usage'] = {'input_tokens': 512, 'context_limit': 512}
+    step = analyze(exp)['players']['always_rock']['steps']['action']
+    assert step['valid'] == 0
+    assert step['frequencies'] == {}
+
+
+def test_missing_chosen_probability_is_not_a_crash(tmp_path):
+    exp = save_match(tmp_path, RockPaperScissors(), [FixedPlayer(ROCK), FixedPlayer(PAPER)], 1)
+    exp['decisions'][0]['probabilities'] = {PAPER: 1}
+    step = analyze(exp)['players']['always_rock']['steps']['action']
+    assert step['mean_probability_of_chosen'] is None

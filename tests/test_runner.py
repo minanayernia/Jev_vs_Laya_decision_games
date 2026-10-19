@@ -126,3 +126,26 @@ def test_context_limit_is_flagged(tmp_path):
 
     summary = run_match(PrisonersDilemma(), [Truncated(), FixedPlayer(C)], 2, 1, tmp_path, "t")
     assert summary["players"]["long"]["at_context_limit"] == 2
+
+
+def test_existing_experiment_is_never_overwritten(tmp_path):
+    import pytest
+    players = [FixedPlayer(C), FixedPlayer(D)]
+    run_match(PrisonersDilemma(), players, 2, 1, tmp_path, 'saved')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(FileExistsError):
+        run_match(PrisonersDilemma(), players, 1, 1, tmp_path, 'saved')
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def test_cli_rejects_existing_directory_before_loading_models(tmp_path, monkeypatch):
+    import pytest
+    from experiments import run_tournament as runner
+    out = tmp_path / 'prisoners_dilemma' / 'existing'
+    out.mkdir(parents=True)
+    config = out / 'config.json'
+    config.write_text('original')
+    monkeypatch.setattr(runner, 'make_players', lambda *a: pytest.fail('must not load models'))
+    with pytest.raises(SystemExit):
+        runner.main(['--results-dir', str(tmp_path), '--experiment-id', 'existing'])
+    assert config.read_text() == 'original'
